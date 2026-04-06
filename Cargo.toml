@@ -19,23 +19,3 @@ bytes = "1"
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros"] }
 tracing-subscriber = "0.3"
-
-[[example]]
-name = "simple"
-path = "examples/simple.rs"
-
-[[example]]
-name = "simple_tools"
-path = "examples/simple_tools.rs"
-
-[[example]]
-name = "orchestrator"
-path = "examples/orchestrator.rs"
-
-[[example]]
-name = "interactive"
-path = "examples/interactive.rs"
-
-[[example]]
-name = "interactive_tools"
-path = "examples/interactive_tools.rs"
