@@ -216,14 +216,29 @@ impl ChatResponse {
 
 /// An event yielded by a streaming chat response.
 ///
-/// Content deltas are emitted immediately as they arrive. Tool calls are
-/// accumulated internally and delivered in full once the stream ends.
+/// Content deltas are emitted immediately as they arrive. Tool call
+/// argument deltas are emitted as fragments arrive, and the full list
+/// of tool calls is delivered once the stream ends.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChatStreamEvent {
     /// Incremental reasoning/thinking text (e.g. from DeepSeek-R1 or extended-thinking models).
     ThinkingDelta(String),
     /// Incremental text content from the assistant.
     ContentDelta(String),
+    /// Incremental tool call argument fragment.
+    ///
+    /// Emitted as each chunk of tool call arguments arrives from the stream.
+    /// The `arguments_delta` field contains only the new fragment (not the
+    /// accumulated total). Consumers should accumulate these if they need
+    /// the full arguments before the tool call completes.
+    ToolCallArgumentDelta {
+        /// Unique tool call ID (stable across deltas for the same call).
+        id: String,
+        /// Tool/function name (may be empty until the name fragment arrives).
+        name: String,
+        /// Incremental argument fragment (JSON text fragment).
+        arguments_delta: String,
+    },
     /// Stream finished. Contains all tool calls requested by the model (may be empty).
     Done(Vec<ToolCall>),
 }

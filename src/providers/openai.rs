@@ -822,14 +822,19 @@ where
                         if let Some(tool_calls) = choice.delta.tool_calls {
                             for tc in tool_calls {
                                 let builder = this.tool_call_builders.entry(tc.index).or_default();
-                                if let Some(id) = tc.id {
-                                    builder.id = id;
+                                if let Some(id) = &tc.id {
+                                    builder.id = id.clone();
                                 }
-                                if let Some(name) = tc.function.name {
-                                    builder.name = name;
+                                if let Some(name) = &tc.function.name {
+                                    builder.name = name.clone();
                                 }
-                                if let Some(args) = tc.function.arguments {
-                                    builder.arguments.push_str(&args);
+                                if let Some(args) = &tc.function.arguments {
+                                    builder.arguments.push_str(args);
+                                    return Poll::Ready(Some(Ok(ChatStreamEvent::ToolCallArgumentDelta {
+                                        id: builder.id.clone(),
+                                        name: builder.name.clone(),
+                                        arguments_delta: args.clone(),
+                                    })));
                                 }
                             }
                         }
@@ -869,6 +874,25 @@ where
                                 return Poll::Ready(Some(Ok(ChatStreamEvent::ContentDelta(
                                     content,
                                 ))));
+                            }
+                            if let Some(tool_calls) = choice.delta.tool_calls {
+                                for tc in tool_calls {
+                                    let builder = this.tool_call_builders.entry(tc.index).or_default();
+                                    if let Some(id) = &tc.id {
+                                        builder.id = id.clone();
+                                    }
+                                    if let Some(name) = &tc.function.name {
+                                        builder.name = name.clone();
+                                    }
+                                    if let Some(args) = &tc.function.arguments {
+                                        builder.arguments.push_str(args);
+                                        return Poll::Ready(Some(Ok(ChatStreamEvent::ToolCallArgumentDelta {
+                                            id: builder.id.clone(),
+                                            name: builder.name.clone(),
+                                            arguments_delta: args.clone(),
+                                        })));
+                                    }
+                                }
                             }
                         }
                     }
