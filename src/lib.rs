@@ -10,9 +10,10 @@ pub use agent::{
 };
 pub use error::{AgentError, AgentResult};
 pub use llm::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, MockLLMClient,
+    ChatMessage, ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, MockLLMClient,
     ReasoningConfig, SimpleLLMClient, ToolCall, ToolDefinition,
 };
 pub use providers::{OpenAIClientConfig, OpenAILLMClient};
+pub use tokio_util::sync::CancellationToken;
 pub use tool::{DynTool, Tool, ToolRegistry};
 pub use types::{AgentId, AgentStatus, DateTime, SubscriptionId, TaskId, Utc};

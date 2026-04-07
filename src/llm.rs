@@ -214,6 +214,15 @@ impl ChatResponse {
     }
 }
 
+/// Reason the stream finished.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum FinishReason {
+    /// Model finished normally (stop token, all tool calls delivered).
+    Complete,
+    /// Stream was cancelled via CancellationToken.
+    Cancelled,
+}
+
 /// An event yielded by a streaming chat response.
 ///
 /// Content deltas are emitted immediately as they arrive. Tool call
@@ -239,8 +248,14 @@ pub enum ChatStreamEvent {
         /// Incremental argument fragment (JSON text fragment).
         arguments_delta: String,
     },
-    /// Stream finished. Contains all tool calls requested by the model (may be empty).
-    Done(Vec<ToolCall>),
+    /// Stream finished. Contains all tool calls requested by the model (may be empty)
+    /// and the reason for completion.
+    Done {
+        /// All tool calls requested by the model (may be empty).
+        tool_calls: Vec<ToolCall>,
+        /// Reason the stream finished.
+        finish_reason: FinishReason,
+    },
 }
 
 /// Stream of chat response events.
@@ -322,7 +337,7 @@ impl LLMClient for MockLLMClient {
         )))
     }
 
-    async fn chat_stream(&self, request: ChatRequest) -> AgentResult<ChatStream> {
+    async fn chat_stream(&self, request: ChatRequest, _cancel_token: tokio_util::sync::CancellationToken) -> AgentResult<ChatStream> {
         let response = self.chat(request).await?;
         let content = match response.message {
             ChatMessage::Assistant {
@@ -333,7 +348,10 @@ impl LLMClient for MockLLMClient {
 
         let stream = futures_util::stream::iter(vec![
             Ok(ChatStreamEvent::ContentDelta(content)),
-            Ok(ChatStreamEvent::Done(vec![])),
+            Ok(ChatStreamEvent::Done {
+                tool_calls: vec![],
+                finish_reason: FinishReason::Complete,
+            }),
         ]);
 
         Ok(Box::pin(stream) as ChatStream)
@@ -384,7 +402,11 @@ impl LLMClient for SimpleLLMClient {
         ))
     }
 
-    async fn chat_stream(&self, _request: ChatRequest) -> AgentResult<ChatStream> {
+    async fn chat_stream(
+        &self,
+        _request: ChatRequest,
+        _cancel_token: tokio_util::sync::CancellationToken,
+    ) -> AgentResult<ChatStream> {
         Err(AgentError::ExecutionError(
             "SimpleLLMClient requires implementation with HTTP client".to_string(),
         ))

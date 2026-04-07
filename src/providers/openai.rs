@@ -18,7 +18,8 @@
 use crate::agent::LLMClient;
 use crate::error::{AgentError, AgentResult};
 use crate::llm::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, ToolCall, ToolDefinition,
+    ChatMessage, ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, ToolCall,
+    ToolDefinition,
 };
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
@@ -27,6 +28,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, Header
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 /// Configuration for the OpenAI-compatible LLM client.
@@ -488,7 +490,11 @@ impl OpenAILLMClient {
     }
 
     /// Execute a streaming chat request against the API.
-    async fn execute_chat_streaming(&self, request: ChatRequest) -> AgentResult<ChatStream> {
+    async fn execute_chat_streaming(
+        &self,
+        request: ChatRequest,
+        cancel_token: CancellationToken,
+    ) -> AgentResult<ChatStream> {
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
@@ -555,7 +561,7 @@ impl OpenAILLMClient {
             r
         });
 
-        Ok(Box::pin(SseStream::new(stream)) as ChatStream)
+        Ok(Box::pin(SseStream::new(stream, cancel_token)) as ChatStream)
     }
 }
 
@@ -565,8 +571,12 @@ impl LLMClient for OpenAILLMClient {
         self.execute_chat(request).await
     }
 
-    async fn chat_stream(&self, request: ChatRequest) -> AgentResult<ChatStream> {
-        self.execute_chat_streaming(request).await
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        cancel_token: CancellationToken,
+    ) -> AgentResult<ChatStream> {
+        self.execute_chat_streaming(request, cancel_token).await
     }
 }
 
@@ -729,6 +739,7 @@ struct ToolCallBuilder {
 /// Assemble completed tool calls from accumulated builders.
 fn assemble_done(
     builders: &mut std::collections::HashMap<u32, ToolCallBuilder>,
+    finish_reason: FinishReason,
 ) -> ChatStreamEvent {
     let mut entries: Vec<_> = builders.drain().collect();
     entries.sort_by_key(|(idx, _)| *idx);
@@ -744,7 +755,10 @@ fn assemble_done(
             }
         })
         .collect();
-    ChatStreamEvent::Done(tool_calls)
+    ChatStreamEvent::Done {
+        tool_calls,
+        finish_reason,
+    }
 }
 
 /// Stream that parses SSE from OpenAI and yields [`ChatStreamEvent`]s.
@@ -760,16 +774,19 @@ struct SseStream<S> {
     stream_ended: bool,
     /// Set to true once `Done` has been emitted.
     done_sent: bool,
+    /// Cancellation token to interrupt the stream early.
+    cancel_token: CancellationToken,
 }
 
 impl<S> SseStream<S> {
-    fn new(inner: S) -> Self {
+    fn new(inner: S, cancel_token: CancellationToken) -> Self {
         Self {
             inner,
             buffer: String::new(),
             tool_call_builders: std::collections::HashMap::new(),
             stream_ended: false,
             done_sent: false,
+            cancel_token,
         }
     }
 }
@@ -784,6 +801,16 @@ where
         let this = &mut *self;
 
         loop {
+            // Check for cancellation at the start of each iteration
+            if this.cancel_token.is_cancelled() {
+                if !this.done_sent {
+                    let event = assemble_done(&mut this.tool_call_builders, FinishReason::Cancelled);
+                    this.done_sent = true;
+                    return Poll::Ready(Some(Ok(event)));
+                }
+                return Poll::Ready(None);
+            }
+
             while let Some(pos) = this.buffer.find('\n') {
                 let line = this.buffer[..pos].trim().to_string();
                 this.buffer.drain(..=pos);
@@ -795,7 +822,7 @@ where
                 let data = &line[6..];
 
                 if data == "[DONE]" {
-                    let event = assemble_done(&mut this.tool_call_builders);
+                    let event = assemble_done(&mut this.tool_call_builders, FinishReason::Complete);
                     this.done_sent = true;
                     return Poll::Ready(Some(Ok(event)));
                 }
@@ -854,7 +881,7 @@ where
                     let line = remaining.trim();
                     if let Some(data) = line.strip_prefix("data: ") {
                         if data == "[DONE]" && !this.done_sent {
-                            let event = assemble_done(&mut this.tool_call_builders);
+                            let event = assemble_done(&mut this.tool_call_builders, FinishReason::Complete);
                             this.done_sent = true;
                             return Poll::Ready(Some(Ok(event)));
                         }
@@ -899,7 +926,7 @@ where
                 }
 
                 if !this.done_sent {
-                    let event = assemble_done(&mut this.tool_call_builders);
+                    let event = assemble_done(&mut this.tool_call_builders, FinishReason::Complete);
                     this.done_sent = true;
                     return Poll::Ready(Some(Ok(event)));
                 }

@@ -5,6 +5,7 @@ use crate::types::AgentId;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Type-erased agent stored in the registry.
 ///
@@ -145,6 +146,7 @@ pub struct AgentContext<D, S = ()> {
     pub llm_client: Option<Arc<dyn LLMClient>>,
     pub history: Vec<ChatMessage>,
     pub state: S,
+    pub cancel_token: CancellationToken,
 }
 
 impl<D: 'static, S> Default for AgentContext<D, S>
@@ -159,6 +161,7 @@ where
             llm_client: None,
             history: Vec::new(),
             state: S::default(),
+            cancel_token: CancellationToken::new(),
         }
     }
 }
@@ -371,7 +374,11 @@ use crate::llm::{ChatRequest, ChatResponse, ChatStream};
 pub trait LLMClient: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> AgentResult<ChatResponse>;
 
-    async fn chat_stream(&self, request: ChatRequest) -> AgentResult<ChatStream>;
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        cancel_token: CancellationToken,
+    ) -> AgentResult<ChatStream>;
 
     async fn complete(&self, prompt: &str) -> AgentResult<String> {
         let request = ChatRequest::new(vec![crate::llm::ChatMessage::user(prompt)]);
