@@ -247,11 +247,15 @@ impl OpenAILLMClient {
     }
 
     /// Build the headers for API requests.
-    fn build_headers(&self) -> HeaderMap {
+    fn build_headers(&self, request: &ChatRequest) -> HeaderMap {
         let mut headers = HeaderMap::new();
+        let auth_value = request
+            .authorization
+            .clone()
+            .unwrap_or_else(|| self.config.api_key.clone());
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", self.config.api_key)).unwrap(),
+            HeaderValue::from_str(&format!("Bearer {}", auth_value)).unwrap(),
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -442,7 +446,7 @@ impl OpenAILLMClient {
         let response = self
             .http_client
             .post(&url)
-            .headers(self.build_headers())
+            .headers(self.build_headers(&request))
             .json(&body)
             .send()
             .await
@@ -511,7 +515,7 @@ impl OpenAILLMClient {
         let response = self
             .http_client
             .post(&url)
-            .headers(self.build_headers())
+            .headers(self.build_headers(&request))
             .json(&body)
             .send()
             .await
