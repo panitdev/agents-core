@@ -55,6 +55,7 @@ pub struct ChatRequest {
     pub model: Option<String>,
     pub reasoning: Option<ReasoningConfig>,
     pub fallbacks: Option<Vec<String>>,
+    pub authorization: Option<String>,
 }
 
 impl ChatRequest {
@@ -66,6 +67,7 @@ impl ChatRequest {
             model: None,
             reasoning: None,
             fallbacks: None,
+            authorization: None,
         }
     }
 
@@ -91,6 +93,11 @@ impl ChatRequest {
 
     pub fn with_fallbacks(mut self, fallbacks: Vec<String>) -> Self {
         self.fallbacks = Some(fallbacks);
+        self
+    }
+
+    pub fn with_authorization(mut self, authorization: String) -> Self {
+        self.authorization = Some(authorization);
         self
     }
 }
