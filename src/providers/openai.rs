@@ -9,16 +9,16 @@
 //! use panit_agents_core::providers::OpenAILLMClient;
 //! use panit_agents_core::agent::LLMClient;
 //!
-//! async fn example() -> panit_agents_core::AgentResult<String> {
+//! async fn example() -> panit_agents_core::LLMResult<String> {
 //!     let client = OpenAILLMClient::new("sk-api-key".to_string(), "gpt-4".to_string());
 //!     client.complete("Hello, world!").await
 //! }
 //! ```
 
-use crate::agent::LLMClient;
-use crate::error::{AgentError, AgentResult};
+use crate::error::{LLMError, LLMResult};
 use crate::llm::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, ToolCall, ToolDefinition,
+    ChatMessage, ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, LLMClient, ToolCall,
+    ToolDefinition,
 };
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
@@ -27,7 +27,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, Header
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Configuration for the OpenAI-compatible LLM client.
 ///
@@ -166,7 +166,7 @@ impl OpenAIClientConfig {
 /// use panit_agents_core::providers::OpenAILLMClient;
 /// use panit_agents_core::agent::LLMClient;
 ///
-/// async fn example() -> panit_agents_core::AgentResult<String> {
+/// async fn example() -> panit_agents_core::LLMResult<String> {
 ///     let client = OpenAILLMClient::new("sk-api-key".to_string(), "gpt-4".to_string());
 ///     client.complete("What is the capital of France?").await
 /// }
@@ -179,7 +179,7 @@ impl OpenAIClientConfig {
 /// use panit_agents_core::agent::LLMClient;
 /// use panit_agents_core::llm::{ChatMessage, ChatRequest};
 ///
-/// async fn with_config() -> panit_agents_core::AgentResult<String> {
+/// async fn with_config() -> panit_agents_core::LLMResult<String> {
 ///     let config = OpenAIClientConfig::new("sk-api-key".to_string(), "gpt-4".to_string())
 ///         .with_base_url("https://openrouter.ai/api/v1")
 ///         .with_temperature(0.5)
@@ -196,7 +196,7 @@ impl OpenAIClientConfig {
 /// use panit_agents_core::providers::{OpenAIClientConfig, OpenAILLMClient};
 /// use panit_agents_core::agent::LLMClient;
 ///
-/// async fn openrouter() -> panit_agents_core::AgentResult<String> {
+/// async fn openrouter() -> panit_agents_core::LLMResult<String> {
 ///     let config = OpenAIClientConfig::new("sk-or-v2-...", "anthropic/claude-3.5-sonnet")
 ///         .with_base_url("https://openrouter.ai/api/v1");
 ///
@@ -384,11 +384,11 @@ impl OpenAILLMClient {
     }
 
     /// Handle the API response and convert to ChatResponse.
-    fn handle_response(&self, response: OpenAIChatResponse) -> AgentResult<ChatResponse> {
+    fn handle_response(&self, response: OpenAIChatResponse) -> LLMResult<ChatResponse> {
         let message = response
             .choices
             .first()
-            .ok_or_else(|| AgentError::ExecutionError("No choices in response".to_string()))?;
+            .ok_or_else(|| LLMError::NoChoices)?;
 
         tracing::debug!("Parsed message: {:?}", message.message);
 
@@ -431,7 +431,7 @@ impl OpenAILLMClient {
     }
 
     /// Execute a chat request against the API.
-    async fn execute_chat(&self, request: ChatRequest) -> AgentResult<ChatResponse> {
+    async fn execute_chat(&self, request: ChatRequest) -> LLMResult<ChatResponse> {
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
@@ -451,7 +451,7 @@ impl OpenAILLMClient {
             .send()
             .await
             .map_err(|e| {
-                AgentError::ExecutionError(format!(
+                LLMError::RequestFailed(format!(
                     "HTTP request failed: {}\nURL: {}\nModel: {}",
                     e, url, model
                 ))
@@ -462,10 +462,13 @@ impl OpenAILLMClient {
         if !status.is_success() {
             let response_body = response.text().await.unwrap_or_default();
             tracing::error!("API error: {} - {}", status, response_body);
-            return Err(AgentError::ExecutionError(format!(
-                "API error {}\nURL: {}\nModel: {}\nResponse: {}",
-                status, url, model, response_body
-            )));
+            return Err(LLMError::ApiError {
+                status: status.as_u16(),
+                message: format!(
+                    "URL: {}\nModel: {}\nResponse: {}",
+                    url, model, response_body
+                ),
+            });
         }
 
         let response_body = response.text().await.unwrap_or_default();
@@ -480,7 +483,7 @@ impl OpenAILLMClient {
 
         let chat_response: OpenAIChatResponse =
             serde_json::from_str(&response_body).map_err(|e| {
-                AgentError::ExecutionError(format!(
+                LLMError::ParseError(format!(
                     "Failed to parse OpenAI response: {}\nURL: {}\nModel: {}\nResponse body: {}",
                     e, url, model, response_body
                 ))
@@ -492,7 +495,7 @@ impl OpenAILLMClient {
     }
 
     /// Execute a streaming chat request against the API.
-    async fn execute_chat_streaming(&self, request: ChatRequest) -> AgentResult<ChatStream> {
+    async fn execute_chat_streaming(&self, request: ChatRequest) -> LLMResult<ChatStream> {
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
@@ -520,7 +523,7 @@ impl OpenAILLMClient {
             .send()
             .await
             .map_err(|e| {
-                AgentError::ExecutionError(format!(
+                LLMError::RequestFailed(format!(
                     "HTTP request failed: {}\nURL: {}\nModel: {}",
                     e, url, model
                 ))
@@ -531,10 +534,13 @@ impl OpenAILLMClient {
         if !status.is_success() {
             let response_body = response.text().await.unwrap_or_default();
             tracing::error!("API error: {} - {}", status, response_body);
-            return Err(AgentError::ExecutionError(format!(
-                "API error {}\nURL: {}\nModel: {}\nResponse: {}",
-                status, url, model, response_body
-            )));
+            return Err(LLMError::ApiError {
+                status: status.as_u16(),
+                message: format!(
+                    "URL: {}\nModel: {}\nResponse: {}",
+                    url, model, response_body
+                ),
+            });
         }
 
         let stream = response.bytes_stream();
@@ -565,11 +571,11 @@ impl OpenAILLMClient {
 
 #[async_trait]
 impl LLMClient for OpenAILLMClient {
-    async fn chat(&self, request: ChatRequest) -> AgentResult<ChatResponse> {
+    async fn chat(&self, request: ChatRequest) -> LLMResult<ChatResponse> {
         self.execute_chat(request).await
     }
 
-    async fn chat_stream(&self, request: ChatRequest) -> AgentResult<ChatStream> {
+    async fn chat_stream(&self, request: ChatRequest) -> LLMResult<ChatStream> {
         self.execute_chat_streaming(request).await
     }
 }
@@ -782,7 +788,7 @@ impl<S> Stream for SseStream<S>
 where
     S: futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
 {
-    type Item = Result<ChatStreamEvent, AgentError>;
+    type Item = Result<ChatStreamEvent, LLMError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
@@ -834,11 +840,13 @@ where
                                 }
                                 if let Some(args) = &tc.function.arguments {
                                     builder.arguments.push_str(args);
-                                    return Poll::Ready(Some(Ok(ChatStreamEvent::ToolCallArgumentDelta {
-                                        id: builder.id.clone(),
-                                        name: builder.name.clone(),
-                                        arguments_delta: args.clone(),
-                                    })));
+                                    return Poll::Ready(Some(Ok(
+                                        ChatStreamEvent::ToolCallArgumentDelta {
+                                            id: builder.id.clone(),
+                                            name: builder.name.clone(),
+                                            arguments_delta: args.clone(),
+                                        },
+                                    )));
                                 }
                             }
                         }
@@ -881,7 +889,8 @@ where
                             }
                             if let Some(tool_calls) = choice.delta.tool_calls {
                                 for tc in tool_calls {
-                                    let builder = this.tool_call_builders.entry(tc.index).or_default();
+                                    let builder =
+                                        this.tool_call_builders.entry(tc.index).or_default();
                                     if let Some(id) = &tc.id {
                                         builder.id = id.clone();
                                     }
@@ -890,11 +899,13 @@ where
                                     }
                                     if let Some(args) = &tc.function.arguments {
                                         builder.arguments.push_str(args);
-                                        return Poll::Ready(Some(Ok(ChatStreamEvent::ToolCallArgumentDelta {
-                                            id: builder.id.clone(),
-                                            name: builder.name.clone(),
-                                            arguments_delta: args.clone(),
-                                        })));
+                                        return Poll::Ready(Some(Ok(
+                                            ChatStreamEvent::ToolCallArgumentDelta {
+                                                id: builder.id.clone(),
+                                                name: builder.name.clone(),
+                                                arguments_delta: args.clone(),
+                                            },
+                                        )));
                                     }
                                 }
                             }
@@ -915,7 +926,7 @@ where
                     this.buffer.push_str(&String::from_utf8_lossy(&chunk));
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(AgentError::ExecutionError(format!(
+                    return Poll::Ready(Some(Err(LLMError::StreamError(format!(
                         "Stream read error: {}",
                         e
                     )))));
