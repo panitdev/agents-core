@@ -1,9 +1,48 @@
-use crate::agent::LLMClient;
-use crate::error::{AgentError, AgentResult};
+use crate::error::{LLMError, LLMResult};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::pin::Pin;
+
+/// Client for interacting with language models.
+///
+/// Provides a unified interface for LLM interactions, supporting both
+/// plain text and JSON-structured responses. Implementations may wrap
+/// various LLM APIs (OpenAI, Anthropic, local models, etc.).
+///
+/// # Examples
+///
+/// ```
+/// use panit_agents_core::agent::LLMClient;
+/// use panit_agents_core::MockLLMClient;
+///
+/// async fn example() -> panit_agents_core::LLMResult<String> {
+///     let client = MockLLMClient::new("gpt-4".to_string());
+///     client.complete("Hello, world!").await
+/// }
+/// ```
+#[async_trait]
+pub trait LLMClient: Send + Sync {
+    async fn chat(&self, request: ChatRequest) -> LLMResult<ChatResponse>;
+
+    async fn chat_stream(&self, request: ChatRequest) -> LLMResult<ChatStream>;
+
+    async fn complete(&self, prompt: &str) -> LLMResult<String> {
+        let request = ChatRequest::new(vec![crate::llm::ChatMessage::user(prompt)]);
+        let response = self.chat(request).await?;
+        if let crate::llm::ChatMessage::Assistant {
+            content: Some(content),
+            ..
+        } = response.message
+        {
+            Ok(content)
+        } else {
+            Err(LLMError::ParseError(
+                "Expected assistant message with content".to_string(),
+            ))
+        }
+    }
+}
 
 /// Reasoning configuration for models that support extended thinking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,7 +291,7 @@ pub enum ChatStreamEvent {
 
 /// Stream of chat response events.
 pub type ChatStream =
-    Pin<Box<dyn futures_util::Stream<Item = Result<ChatStreamEvent, AgentError>> + Send>>;
+    Pin<Box<dyn futures_util::Stream<Item = Result<ChatStreamEvent, LLMError>> + Send>>;
 
 /// Mock LLM client for testing and development.
 ///
@@ -266,12 +305,12 @@ pub type ChatStream =
 /// use panit_agents_core::agent::LLMClient;
 /// use serde_json::json;
 ///
-/// async fn example() -> panit_agents_core::AgentResult<String> {
+/// async fn example() -> panit_agents_core::LLMResult<String> {
 ///     let client = MockLLMClient::new("gpt-4".to_string());
 ///     client.complete("Hello").await
 /// }
 ///
-/// async fn with_template() -> panit_agents_core::AgentResult<String> {
+/// async fn with_template() -> panit_agents_core::LLMResult<String> {
 ///     let client = MockLLMClient::new("gpt-4".to_string())
 ///         .with_response_template(json!("Mock response"));
 ///     client.complete("Hello").await
@@ -298,7 +337,7 @@ impl MockLLMClient {
 
 #[async_trait]
 impl LLMClient for MockLLMClient {
-    async fn chat(&self, request: ChatRequest) -> AgentResult<ChatResponse> {
+    async fn chat(&self, request: ChatRequest) -> LLMResult<ChatResponse> {
         tracing::info!(
             "MockLLMClient chat with {} messages",
             request.messages.len()
@@ -313,7 +352,7 @@ impl LLMClient for MockLLMClient {
 
         if let Some(ref template) = self.response_template {
             let response_str = serde_json::to_string(template)
-                .map_err(|e| AgentError::ExecutionError(e.to_string()))?;
+                .map_err(|e| LLMError::ParseError(e.to_string()))?;
             return Ok(ChatResponse::new(ChatMessage::assistant(
                 Some(response_str),
                 None,
@@ -329,7 +368,7 @@ impl LLMClient for MockLLMClient {
         )))
     }
 
-    async fn chat_stream(&self, request: ChatRequest) -> AgentResult<ChatStream> {
+    async fn chat_stream(&self, request: ChatRequest) -> LLMResult<ChatStream> {
         let response = self.chat(request).await?;
         let content = match response.message {
             ChatMessage::Assistant {
@@ -344,56 +383,5 @@ impl LLMClient for MockLLMClient {
         ]);
 
         Ok(Box::pin(stream) as ChatStream)
-    }
-}
-
-/// LLM client configured for a specific API endpoint.
-///
-/// Currently a placeholder implementation. Requires an HTTP client
-/// to be added for actual API calls.
-///
-/// # Examples
-///
-/// ```
-/// use panit_agents_core::llm::SimpleLLMClient;
-///
-/// let client = SimpleLLMClient::new("sk-test".to_string(), "gpt-4".to_string());
-/// ```
-pub struct SimpleLLMClient {
-    api_key: String,
-    model: String,
-    base_url: String,
-}
-
-impl SimpleLLMClient {
-    pub fn new(api_key: String, model: String) -> Self {
-        let base_url = std::env::var("OPENAI_API_URL")
-            .or_else(|_| std::env::var("OPENROUTER_API_URL"))
-            .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
-        Self {
-            api_key,
-            model,
-            base_url,
-        }
-    }
-
-    pub fn with_base_url(mut self, base_url: String) -> Self {
-        self.base_url = base_url;
-        self
-    }
-}
-
-#[async_trait]
-impl LLMClient for SimpleLLMClient {
-    async fn chat(&self, _request: ChatRequest) -> AgentResult<ChatResponse> {
-        Err(AgentError::ExecutionError(
-            "SimpleLLMClient requires implementation with HTTP client".to_string(),
-        ))
-    }
-
-    async fn chat_stream(&self, _request: ChatRequest) -> AgentResult<ChatStream> {
-        Err(AgentError::ExecutionError(
-            "SimpleLLMClient requires implementation with HTTP client".to_string(),
-        ))
     }
 }
