@@ -473,12 +473,6 @@ impl OpenAILLMClient {
 
         let response_body = response.text().await.unwrap_or_default();
 
-        tracing::info!(
-            "Raw LLM response ({} chars): {}",
-            response_body.len(),
-            response_body
-        );
-
         tracing::debug!("Response body: {}", response_body);
 
         let chat_response: OpenAIChatResponse =
