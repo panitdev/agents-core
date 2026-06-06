@@ -10,6 +10,6 @@ pub use history::{
 };
 pub use llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, MockLLMClient,
-    ReasoningConfig, ToolCall, ToolDefinition,
+    ReasoningConfig, StreamAccumulator, ToolCall, ToolDefinition,
 };
 pub use providers::{OpenAIClientConfig, OpenAILLMClient};

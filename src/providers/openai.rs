@@ -559,7 +559,7 @@ impl OpenAILLMClient {
             r
         });
 
-        Ok(Box::pin(SseStream::new(stream)) as ChatStream)
+        Ok(Box::pin(SseStream::new(stream, request.cancellation_token.clone())) as ChatStream)
     }
 }
 
@@ -764,16 +764,19 @@ struct SseStream<S> {
     stream_ended: bool,
     /// Set to true once `Done` has been emitted.
     done_sent: bool,
+    /// Optional cancel signal — returns `None` promptly when fired.
+    cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl<S> SseStream<S> {
-    fn new(inner: S) -> Self {
+    fn new(inner: S, cancel: Option<tokio_util::sync::CancellationToken>) -> Self {
         Self {
             inner,
             buffer: String::new(),
             tool_call_builders: std::collections::HashMap::new(),
             stream_ended: false,
             done_sent: false,
+            cancel,
         }
     }
 }
@@ -786,6 +789,10 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
+
+        if this.cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+            return Poll::Ready(None);
+        }
 
         loop {
             while let Some(pos) = this.buffer.find('\n') {

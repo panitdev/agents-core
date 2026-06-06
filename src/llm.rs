@@ -95,6 +95,9 @@ pub struct ChatRequest {
     pub reasoning: Option<ReasoningConfig>,
     pub fallbacks: Option<Vec<String>>,
     pub authorization: Option<String>,
+    /// Runtime-only cancel signal; never serialized.
+    #[serde(skip)]
+    pub cancellation_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl ChatRequest {
@@ -107,6 +110,7 @@ impl ChatRequest {
             reasoning: None,
             fallbacks: None,
             authorization: None,
+            cancellation_token: None,
         }
     }
 
@@ -137,6 +141,14 @@ impl ChatRequest {
 
     pub fn with_authorization(mut self, authorization: String) -> Self {
         self.authorization = Some(authorization);
+        self
+    }
+
+    pub fn with_cancellation_token(
+        mut self,
+        token: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        self.cancellation_token = Some(token);
         self
     }
 }
@@ -293,6 +305,85 @@ pub enum ChatStreamEvent {
 pub type ChatStream =
     Pin<Box<dyn futures_util::Stream<Item = Result<ChatStreamEvent, LLMError>> + Send>>;
 
+enum Phase {
+    Streaming,
+    Completed(Vec<ToolCall>),
+}
+
+/// Folds a [`ChatStream`] into a committable assistant turn.
+///
+/// Normal path: poll events into `push`, then call `finish_complete` after `Done`.
+/// Interrupted path: stop polling and call `finish_interrupted` to get a
+/// text-only message with no tool_calls, safe to commit as-is.
+pub struct StreamAccumulator {
+    content: String,
+    phase: Phase,
+}
+
+impl StreamAccumulator {
+    pub fn new() -> Self {
+        Self {
+            content: String::new(),
+            phase: Phase::Streaming,
+        }
+    }
+
+    /// Fold one stream event into the accumulator.
+    ///
+    /// `Done` finalizes the tool-call list. `ThinkingDelta` and
+    /// `ToolCallArgumentDelta` are handled by history recording on the
+    /// caller side; the accumulator ignores them.
+    pub fn push(&mut self, event: ChatStreamEvent) {
+        match event {
+            ChatStreamEvent::ContentDelta(s) => self.content.push_str(&s),
+            // `Done` is the sole source of finalized tool calls; partial
+            // builder state from ToolCallArgumentDelta is not retained here.
+            ChatStreamEvent::Done(tool_calls) => {
+                self.phase = Phase::Completed(tool_calls);
+            }
+            ChatStreamEvent::ThinkingDelta(_) | ChatStreamEvent::ToolCallArgumentDelta { .. } => {}
+        }
+    }
+
+    /// Consume the accumulator after a complete stream (phase == Completed).
+    ///
+    /// Returns the assistant message and the tool calls for dispatch.
+    ///
+    /// # Panics
+    /// Panics if called before a `Done` event was pushed.
+    pub fn finish_complete(self) -> (ChatMessage, Vec<ToolCall>) {
+        let Phase::Completed(tool_calls) = self.phase else {
+            panic!("finish_complete called before Done event");
+        };
+        let content = (!self.content.is_empty()).then_some(self.content);
+        let message = ChatMessage::assistant(
+            content,
+            (!tool_calls.is_empty()).then(|| tool_calls.clone()),
+        );
+        (message, tool_calls)
+    }
+
+    /// Consume the accumulator on interrupt (phase == Streaming).
+    ///
+    /// Returns a text-only message, or `None` if nothing was accumulated.
+    /// All tool-call builder state is discarded — partial arguments are
+    /// never parseable, and no `tool_call` entry enters the message, so
+    /// the next request requires no synthetic tool result.
+    pub fn finish_interrupted(self) -> Option<ChatMessage> {
+        if self.content.is_empty() {
+            None
+        } else {
+            Some(ChatMessage::assistant(Some(self.content), None))
+        }
+    }
+}
+
+impl Default for StreamAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Mock LLM client for testing and development.
 ///
 /// Returns predefined responses without making actual API calls.
@@ -383,5 +474,98 @@ impl LLMClient for MockLLMClient {
         ]);
 
         Ok(Box::pin(stream) as ChatStream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{ChatMessage, ChatStreamEvent, StreamAccumulator, ToolCall};
+
+    #[test]
+    fn normal_path_text_only() {
+        let mut acc = StreamAccumulator::new();
+        acc.push(ChatStreamEvent::ContentDelta("hello ".into()));
+        acc.push(ChatStreamEvent::ContentDelta("world".into()));
+        acc.push(ChatStreamEvent::Done(vec![]));
+
+        let (msg, tool_calls) = acc.finish_complete();
+        assert_eq!(msg, ChatMessage::assistant(Some("hello world".into()), None));
+        assert!(tool_calls.is_empty());
+    }
+
+    #[test]
+    fn normal_path_with_tool_calls() {
+        let mut acc = StreamAccumulator::new();
+        acc.push(ChatStreamEvent::ContentDelta("running".into()));
+        acc.push(ChatStreamEvent::ToolCallArgumentDelta {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments_delta: "{\"cmd\":".into(),
+        });
+        acc.push(ChatStreamEvent::ToolCallArgumentDelta {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments_delta: "\"ls\"}".into(),
+        });
+        let done_calls = vec![ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: json!({"cmd": "ls"}),
+        }];
+        acc.push(ChatStreamEvent::Done(done_calls.clone()));
+
+        let (msg, tool_calls) = acc.finish_complete();
+        assert_eq!(
+            msg,
+            ChatMessage::assistant(Some("running".into()), Some(done_calls.clone()))
+        );
+        assert_eq!(tool_calls, done_calls);
+    }
+
+    #[test]
+    fn interrupted_with_partial_text() {
+        let mut acc = StreamAccumulator::new();
+        acc.push(ChatStreamEvent::ContentDelta("partial".into()));
+        // Never receives Done — simulates mid-stream interrupt.
+
+        let msg = acc.finish_interrupted().expect("should produce a message");
+        assert_eq!(msg, ChatMessage::assistant(Some("partial".into()), None));
+        // Crucially, no tool_calls in the message.
+        assert!(matches!(
+            msg,
+            ChatMessage::Assistant { tool_calls: None, .. }
+        ));
+    }
+
+    #[test]
+    fn interrupted_with_arg_deltas_but_no_text() {
+        let mut acc = StreamAccumulator::new();
+        acc.push(ChatStreamEvent::ToolCallArgumentDelta {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments_delta: "{\"cmd\":".into(),
+        });
+        // Interrupted before Done — partial args discarded, no text accumulated.
+
+        assert!(acc.finish_interrupted().is_none());
+    }
+
+    #[test]
+    fn interrupted_empty() {
+        let acc = StreamAccumulator::new();
+        assert!(acc.finish_interrupted().is_none());
+    }
+
+    #[test]
+    fn thinking_delta_ignored() {
+        let mut acc = StreamAccumulator::new();
+        acc.push(ChatStreamEvent::ThinkingDelta("step 1".into()));
+        acc.push(ChatStreamEvent::ContentDelta("answer".into()));
+        acc.push(ChatStreamEvent::Done(vec![]));
+
+        let (msg, _) = acc.finish_complete();
+        assert_eq!(msg, ChatMessage::assistant(Some("answer".into()), None));
     }
 }
