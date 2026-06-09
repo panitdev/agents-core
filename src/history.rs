@@ -130,6 +130,26 @@ where
         Ok(())
     }
 
+    /// Flush all buffered (unpersisted) events to the store without requiring a
+    /// terminal event such as [`AgentHistoryEvent::AgentEnd`].
+    ///
+    /// Call this when a streaming turn is interrupted — after
+    /// [`StreamAccumulator::finish_interrupted`] — to guarantee that any tokens
+    /// accumulated since the last tool-call boundary reach persistent storage.
+    /// Each agent buffer is drained (emptied) so that subsequent events for the
+    /// same agent continue to accumulate correctly; a later `AgentEnd` will flush
+    /// whatever arrives after this call.
+    pub async fn flush_pending(&self) -> Result<(), S::Error> {
+        let batches = {
+            let mut recorder = self.recorder.lock().await;
+            recorder.drain_all_buffers()
+        };
+        for batch in batches {
+            self.store.append_agent_events(batch).await?;
+        }
+        Ok(())
+    }
+
     pub async fn load_rehydrated(
         &self,
         fallback_agent_id: S::AgentId,
@@ -157,6 +177,22 @@ where
             buffers: HashMap::new(),
             agent_models: HashMap::new(),
         }
+    }
+
+    /// Drain every non-empty agent buffer and return the events for persistence.
+    ///
+    /// Used when a turn ends without a terminal event (e.g. streaming interruption):
+    /// the caller persists the returned batches so that buffered tokens are not lost.
+    /// After the drain each buffer remains registered (empty), so future events for
+    /// that agent continue to accumulate normally.
+    pub fn drain_all_buffers(
+        &mut self,
+    ) -> Vec<Vec<PersistedAgentHistoryEvent<RecordId, AgentId>>> {
+        self.buffers
+            .values_mut()
+            .filter(|buf| !buf.is_empty())
+            .map(|buf| buf.drain(..).collect())
+            .collect()
     }
 
     pub fn push_event<F>(
@@ -606,6 +642,72 @@ mod tests {
                 ChatMessage::tool(Some("call-1".to_string()), "{\"ok\":true}"),
                 ChatMessage::assistant(Some(" world".to_string()), None),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn post_tool_tokens_are_lost_without_agent_end() {
+        // Regression test for STR-24: Token events after the last ToolCallEnd
+        // sit in the in-memory recorder buffer. Without AgentEnd (e.g. streaming
+        // interruption), they are never persisted, so the final assistant response
+        // is missing from rehydrated history.
+        let persistence = HistoryPersistence::new(InMemoryHistoryStore::default());
+        let mut next_event_id = 100u64;
+        let mut next_id = || {
+            next_event_id += 1;
+            next_event_id
+        };
+
+        persistence
+            .persist_user_message("run pwd".into())
+            .await
+            .expect("ok");
+
+        for event in [
+            AgentHistoryEvent::AgentStart {
+                tool: None,
+                agent: "root".into(),
+                model: None,
+                parent: None,
+            },
+            AgentHistoryEvent::ToolCallStart {
+                id: "call-1".into(),
+                name: "shell".into(),
+                arguments: json!({"cmd": "pwd"}),
+            },
+            AgentHistoryEvent::ToolCallEnd {
+                id: "call-1".into(),
+                content: "/home/user".into(),
+                success: true,
+            },
+            AgentHistoryEvent::Token {
+                content: "The working directory is /home/user".into(),
+            },
+            // AgentEnd deliberately omitted — simulates streaming interruption
+        ] {
+            persistence
+                .record_event(100, event, &mut next_id)
+                .await
+                .expect("ok");
+        }
+
+        // Consumer must call flush_pending when streaming is interrupted.
+        persistence.flush_pending().await.expect("flush ok");
+
+        let rehydrated = persistence
+            .load_rehydrated(999)
+            .await
+            .expect("ok")
+            .expect("history should be present");
+
+        // The final assistant response must survive even without AgentEnd.
+        assert_eq!(
+            rehydrated.history.last(),
+            Some(&ChatMessage::assistant(
+                Some("The working directory is /home/user".into()),
+                None
+            )),
+            "post-tool token was lost because AgentEnd was never emitted"
         );
     }
 
