@@ -365,7 +365,7 @@ where
                     ..
                 } => {
                     pending.finish_into(&mut history);
-                    root_agent_id.get_or_insert(*agent_id);
+                    root_agent_id = Some(*agent_id);
                 }
                 AgentHistoryEvent::Token { content } if Some(*agent_id) == root_agent_id => {
                     pending.content.push_str(content);
@@ -641,6 +641,95 @@ mod tests {
                 ),
                 ChatMessage::tool(Some("call-1".to_string()), "{\"ok\":true}"),
                 ChatMessage::assistant(Some(" world".to_string()), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn rehydrates_multi_turn_root_history() {
+        // Three turns, each with a distinct root agent_id.
+        // Turn 3 asks about turn 2 — all turns must appear in rehydrated history.
+        let records = vec![
+            // Turn 1
+            AgentHistoryRecord::User { content: "turn 1".into() },
+            AgentHistoryRecord::Assistant {
+                agent_id: 1,
+                detail: AgentHistoryEvent::AgentStart {
+                    tool: None,
+                    agent: "root".into(),
+                    model: None,
+                    parent: None,
+                },
+                model: None,
+            },
+            AgentHistoryRecord::Assistant {
+                agent_id: 1,
+                detail: AgentHistoryEvent::Token { content: "reply 1".into() },
+                model: None,
+            },
+            AgentHistoryRecord::Assistant {
+                agent_id: 1,
+                detail: AgentHistoryEvent::AgentEnd,
+                model: None,
+            },
+            // Turn 2
+            AgentHistoryRecord::User { content: "turn 2".into() },
+            AgentHistoryRecord::Assistant {
+                agent_id: 2,
+                detail: AgentHistoryEvent::AgentStart {
+                    tool: None,
+                    agent: "root".into(),
+                    model: None,
+                    parent: None,
+                },
+                model: None,
+            },
+            AgentHistoryRecord::Assistant {
+                agent_id: 2,
+                detail: AgentHistoryEvent::Token { content: "reply 2".into() },
+                model: None,
+            },
+            AgentHistoryRecord::Assistant {
+                agent_id: 2,
+                detail: AgentHistoryEvent::AgentEnd,
+                model: None,
+            },
+            // Turn 3
+            AgentHistoryRecord::User { content: "what did you say in turn 2?".into() },
+            AgentHistoryRecord::Assistant {
+                agent_id: 3,
+                detail: AgentHistoryEvent::AgentStart {
+                    tool: None,
+                    agent: "root".into(),
+                    model: None,
+                    parent: None,
+                },
+                model: None,
+            },
+            AgentHistoryRecord::Assistant {
+                agent_id: 3,
+                detail: AgentHistoryEvent::Token { content: "reply 3".into() },
+                model: None,
+            },
+            AgentHistoryRecord::Assistant {
+                agent_id: 3,
+                detail: AgentHistoryEvent::AgentEnd,
+                model: None,
+            },
+        ];
+
+        let rehydrated = rehydrate_root_history(&records, 99).expect("expected rehydrated history");
+
+        assert_eq!(rehydrated.agent_id, 3);
+        assert_eq!(
+            rehydrated.history,
+            vec![
+                ChatMessage::user("turn 1"),
+                ChatMessage::assistant(Some("reply 1".into()), None),
+                ChatMessage::user("turn 2"),
+                ChatMessage::assistant(Some("reply 2".into()), None),
+                ChatMessage::user("what did you say in turn 2?"),
+                ChatMessage::assistant(Some("reply 3".into()), None),
             ]
         );
     }
